@@ -1,0 +1,25 @@
+#!/usr/bin/env python2
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Jun  6 14:56:18 2017
+
+@author: rodgeryuan
+"""
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from database_tables import box_scores
+
+def game_id_player_id_to_team_id(game_id_player_id):   
+    engine = create_engine('mysql+mysqldb://root:rodgera@localhost/basketball')
+ 
+    # create a Session
+    session = sessionmaker()
+    session.configure(bind=engine)
+    
+    s = session()
+    
+    for team in s.query(box_scores).filter(box_scores.game_id == game_id_player_id[0], box_scores.player_id == game_id_player_id[1]):
+        return team.team_id 
+    
+    s.close()

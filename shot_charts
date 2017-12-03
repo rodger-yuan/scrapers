@@ -1,0 +1,964 @@
+#!/usr/bin/env python2
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Jun 16 10:38:47 2017
+
+@author: rodgeryuan
+"""
+from collections import defaultdict
+from database_tables import *
+import pickle
+from sqlalchemy import Column, ForeignKey, Integer, String, Boolean, func, or_
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import relationship, sessionmaker
+from sqlalchemy import create_engine
+
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+import matplotlib.gridspec as gridspec
+import matplotlib.patches as patches
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib._png import read_png
+from matplotlib.cbook import get_sample_data
+
+import numpy as np
+
+#SET VARIABLES
+
+num_bins = 11 #number of bins
+player_id = 'curryst01' #player_id
+bin_min = 12 #minimum number of shots per bin
+comp_type = 'eFG'
+
+def bin_avg(num_bins): #GET LEAGUE AVERAGE FG FOR EACH BIN
+    if num_bins == 15: #already have this value saved for 15 bisn
+        hist_avg = pickle.load(open('hist_avg_15_bins.p','rb'))
+    elif num_bins == 11:
+        hist_avg = pickle.load(open('hist_avg_11_bins.p','rb'))
+    else:
+        
+        #GET DATA FROM Shot_Chart
+        
+        makes_top = [] #all makes
+        makes_left = []
+        misses_top = [] #all misses
+        misses_left = []
+        
+        session = sessionmaker()
+        session.configure(bind=engine)
+        
+        s = session()
+        
+        query = s.query(Shot_chart)
+        
+        s.close()
+        
+        for item in query:
+            if item.result == 1:
+                makes_top.append(item.top)
+                makes_left.append(item.left)
+            if item.result == 0:
+                misses_top.append(item.top)
+                misses_left.append(item.left)
+         
+        #ARRAGE DATA BY BINS
+        
+        hist_makes, xedges_makes, yedges_makes = np.histogram2d(makes_left, makes_top, bins = num_bins, range = [[0,500],[0,500]])
+        hist_misses, xedges_misses, yedges_misses = np.histogram2d(misses_left, misses_top, bins = num_bins, range = [[0,500],[0,500]])
+        
+        hist_avg = np.zeros_like(hist_makes)
+        
+        for x_coor in np.arange(hist_makes.shape[0]):
+            for y_coor in np.arange(hist_makes.shape[1]):
+                if hist_makes[x_coor][y_coor] + hist_misses[x_coor][y_coor] != 0:
+                    hist_avg[x_coor][y_coor] = hist_makes[x_coor][y_coor]/(hist_makes[x_coor][y_coor] + hist_misses[x_coor][y_coor])
+        
+        hist_avg = hist_avg.flatten()  
+    
+    return hist_avg
+
+def bin_eFG(num_bins): #GET eFG for number of bins
+
+    league_eFG = 0.514
+    
+    xpos, ypos = np.meshgrid(np.linspace(0,500.0*(num_bins-1)/num_bins,num_bins) + 500.0/num_bins/2, np.linspace(0,500.0*(num_bins-1)/num_bins,num_bins)+ 500.0/num_bins/2)
+
+    hist_eFG = np.zeros_like(xpos)
+    
+    for x_coor in np.arange(xpos.shape[0]):
+        for y_coor in np.arange(xpos.shape[1]):
+            if (ypos[x_coor][y_coor] <= 30 or ypos[x_coor][y_coor] >= 470) and xpos[x_coor][y_coor] <= 141:
+                hist_eFG[x_coor][y_coor] = league_eFG*2/3
+            elif xpos[x_coor][y_coor] >= 141 and (ypos[x_coor][y_coor]-250.0)**2 + (xpos[x_coor][y_coor]-52.5)**2 - 230.5**2 > 0:
+                hist_eFG[x_coor][y_coor] = league_eFG*2/3
+            else:
+                hist_eFG[x_coor][y_coor] = league_eFG
+    
+    return hist_eFG.flatten()
+    
+def get_player_data(player_id): #GET PLAYER DATA
+
+    session = sessionmaker()
+    session.configure(bind=engine)
+    
+    s = session()
+    
+    all_top = [] #all shots top
+    all_left = [] #all shots left
+    makes_p_top, misses_p_top, makes_p_left, misses_p_left = [],[],[],[]
+    
+    all_shots = s.query(Shot_chart).filter(Shot_chart.player_id == player_id)
+    makes_p = s.query(Shot_chart).filter(Shot_chart.player_id == player_id, 
+                     Shot_chart.result == 1)
+    misses_p = s.query(Shot_chart).filter(Shot_chart.player_id == player_id, 
+                      Shot_chart.result == 0)
+    
+    s.close()
+    
+    for item in all_shots:
+        all_top.append(item.top + 20)
+        all_left.append(item.left + 9)
+    
+    for item in makes_p:
+        makes_p_top.append(item.top + 20)
+        makes_p_left.append(item.left + 9)
+    
+    for item in misses_p:
+        misses_p_top.append(item.top + 20)
+        misses_p_left.append(item.left + 9)
+        
+    return [all_top, all_left, makes_p_top, misses_p_top, makes_p_left, misses_p_left]
+
+def get_player_data_onoff(player_id, on_off): #GET PLAYER DATA FOR ON/OFF
+                                              #on_off: 'on' or 'off'
+
+    session = sessionmaker()
+    session.configure(bind=engine)
+    
+    s = session()             
+
+    all_top = [] #all shots top
+    all_left = [] #all shots left
+    makes_top, misses_top, makes_left, misses_left = [],[],[],[] 
+    
+    if on_off == 'on':
+        on_court = 1
+    elif on_off == 'off':
+        on_court = 0
+        
+    all_shots = s.query(Shot_chart).join(
+            Shot_with_teammates, Shot_with_teammates.shot_id == Shot_chart.shot_id)\
+            .filter(Shot_with_teammates.teammate_id == player_id,
+                    Shot_with_teammates.on_court == on_court)
+    
+    makes = s.query(Shot_chart).join(
+            Shot_with_teammates, Shot_with_teammates.shot_id == Shot_chart.shot_id)\
+            .filter(Shot_with_teammates.teammate_id == player_id,
+                    Shot_with_teammates.on_court == on_court, 
+                    Shot_chart.result == 1)
+    
+    misses = s.query(Shot_chart).join(
+            Shot_with_teammates, Shot_with_teammates.shot_id == Shot_chart.shot_id)\
+            .filter(Shot_with_teammates.teammate_id == player_id,
+                    Shot_with_teammates.on_court == on_court, 
+                    Shot_chart.result == 0)
+    
+    s.close()
+    
+    for item in all_shots:
+        all_top.append(item.top + 20)
+        all_left.append(item.left + 9)
+    
+    for item in makes:
+        makes_top.append(item.top + 20)
+        makes_left.append(item.left + 9)
+    
+    for item in misses:
+        misses_top.append(item.top + 20)
+        misses_left.append(item.left + 9)
+
+    return [all_top, all_left, makes_top, misses_top, makes_left, misses_left]
+
+def get_player_data_assisted(player_id): #GET PLAYER DATA WITH ASSIST INFO
+
+    session = sessionmaker()
+    session.configure(bind=engine)
+    
+    s = session()
+
+    assist_top, assist_left, unassist_top, unassist_left = [],[],[],[]
+
+    assisted_shots = s.query(Shot_chart).join(
+            Play_by_play, Play_by_play.play_id == Shot_chart.play_id
+            ).filter(
+                    Shot_chart.result == 1, Play_by_play.secondary_player_id != None, 
+                    Shot_chart.player_id == player_id)                         
+    unassisted_shots = s.query(Shot_chart).join(
+            Play_by_play, Play_by_play.play_id == Shot_chart.play_id
+            ).filter(
+                    Shot_chart.result == 1, Play_by_play.secondary_player_id == None, 
+                    Shot_chart.player_id == player_id)
+    
+    s.close()
+    
+    for item in assisted_shots:
+        assist_top.append(item.top + 20)
+        assist_left.append(item.left + 9)
+        
+    for item in unassisted_shots:
+        unassist_top.append(item.top + 20)
+        unassist_left.append(item.left + 9)
+        
+    return [assist_top, assist_left, unassist_top, unassist_left]
+
+def get_player_data_assisted_onoff(player_id, onoff): #GET PLAYER DATA WITH ASSIST INFO
+
+    session = sessionmaker()
+    session.configure(bind=engine)
+    
+    s = session()
+
+    if onoff == 'on':
+        on_court = 1
+    else:
+        on_court = 0
+        
+    assist_top, assist_left, unassist_top, unassist_left = [],[],[],[]
+
+    assisted_shots = s.query(Shot_chart).join(
+            Shot_with_teammates, Shot_with_teammates.shot_id == Shot_chart.shot_id
+            ).join(
+                    Play_by_play, Play_by_play.play_id == Shot_chart.play_id
+                    ).filter(
+                            Shot_chart.result == 1, 
+                            Shot_with_teammates.teammate_id == player_id,
+                            Shot_with_teammates.on_court == on_court,
+                            Play_by_play.secondary_player_id != None, 
+                            )   
+                      
+    unassisted_shots = s.query(Shot_chart).join(
+            Shot_with_teammates, Shot_with_teammates.shot_id == Shot_chart.shot_id
+            ).join(
+                    Play_by_play, Play_by_play.play_id == Shot_chart.play_id
+                    ).filter(
+                            Shot_chart.result == 1, 
+                            Shot_with_teammates.teammate_id == player_id,
+                            Shot_with_teammates.on_court == on_court,
+                            Play_by_play.secondary_player_id == None, 
+                            )   
+    
+    s.close()
+    
+    for item in assisted_shots:
+        assist_top.append(item.top + 20)
+        assist_left.append(item.left + 9)
+        
+    for item in unassisted_shots:
+        unassist_top.append(item.top + 20)
+        unassist_left.append(item.left + 9)
+        
+    return [assist_top, assist_left, unassist_top, unassist_left]
+
+def get_key_stats(player_id): #Get data for text at top right corner of shot chart
+    
+    session = sessionmaker()
+    session.configure(bind=engine)
+    
+    s = session()
+    
+    #fg, fg3, eFG, ts, unassist, total_shots
+    
+    total_shots = float(
+            s.query(func.sum(Box_scores.fg)).filter(
+                    Box_scores.player_id == player_id)[0][0])
+    
+    
+    total_attempts = float(
+            s.query(func.sum(Box_scores.fga)).filter(
+                    Box_scores.player_id == player_id)[0][0]
+            )
+    
+    total_3 = float(
+            s.query(func.sum(Box_scores.fg3)).filter(
+                    Box_scores.player_id == player_id)[0][0]
+            )
+    
+    total_3pa = float(
+            s.query(func.sum(Box_scores.fg3a)).filter(
+                    Box_scores.player_id == player_id)[0][0]
+            )
+    
+    pts = float(
+            s.query(func.sum(Box_scores.pts)).filter(
+                    Box_scores.player_id == player_id)[0][0]
+            )
+    
+    fta = float(
+            s.query(func.sum(Box_scores.fta)).filter(
+                    Box_scores.player_id == player_id)[0][0]
+            )
+    
+    s.close()
+    
+    fg = total_shots/total_attempts
+    fg3 = total_3/total_3pa
+    eFG = (total_shots + 0.5*total_3)/total_attempts
+    ts = pts/(2*(total_attempts + 0.44*fta))
+    
+    assist_top, assist_left, unassist_top, unassist_left = get_player_data_assisted(player_id)
+    
+    unassist = float(len(unassist_top))/(len(unassist_left)+len(assist_left))
+    
+    return [fg, fg3, eFG, ts, unassist, total_attempts]
+
+def get_key_stats_onoff(player_id, onoff): #Get data for text at top right corner of shot chart
+    
+    session = sessionmaker()
+    session.configure(bind=engine)
+    
+    s = session()
+    
+    if onoff == 'on':
+        on_court = 1
+    else:
+        on_court = 0
+    
+    #fg, fg3, eFG, ts, unassist, total_shots
+ 
+    total_shots = float(
+            s.query(func.count(Shot_chart.result)).join(
+                        Shot_with_teammates, Shot_with_teammates.shot_id == Shot_chart.shot_id)\
+                        .filter(Shot_with_teammates.teammate_id == player_id,
+                                Shot_with_teammates.on_court == on_court,
+                                Shot_chart.result == 1)[0][0]
+            )
+    
+    
+    total_attempts = float(
+            s.query(func.count(Shot_chart.result)).join(
+                        Shot_with_teammates, Shot_with_teammates.shot_id == Shot_chart.shot_id)\
+                        .filter(Shot_with_teammates.teammate_id == player_id,
+                                Shot_with_teammates.on_court == on_court)[0][0]
+            )
+    
+    total_3 = float(
+            s.query(func.count(Shot_chart.result)).join(
+                        Shot_with_teammates, Shot_with_teammates.shot_id == Shot_chart.shot_id).join(
+                                Play_by_play, Play_by_play.play_id == Shot_chart.play_id)\
+                        .filter(Shot_with_teammates.teammate_id == player_id,
+                                Shot_with_teammates.on_court == on_court,
+                                Play_by_play.stat == 3)[0][0]
+            )
+    
+    total_3pm = float(
+            s.query(func.count(Shot_chart.result)).join(
+                        Shot_with_teammates, Shot_with_teammates.shot_id == Shot_chart.shot_id).join(
+                                Play_by_play, Play_by_play.play_id == Shot_chart.play_id)\
+                        .filter(Shot_with_teammates.teammate_id == player_id,
+                                Shot_with_teammates.on_court == on_court,
+                                Play_by_play.stat == 6)[0][0]
+            )
+    
+    pts = float(
+            s.query(func.sum(Play_by_play.score_change)).join(
+                        Shot_chart, Shot_chart.play_id == Play_by_play.play_id).join(
+                                Shot_with_teammates, Shot_with_teammates.shot_id == Shot_chart.shot_id)\
+                        .filter(Shot_with_teammates.teammate_id == player_id,
+                                Shot_with_teammates.on_court == on_court)[0][0]
+            ) + float(
+                    s.query(func.sum(Play_by_play.score_change)).join(
+                            Ft_with_teammates,
+                            Ft_with_teammates.play_id == Play_by_play.play_id)\
+                            .filter(Ft_with_teammates.teammate_id == player_id,
+                                    Ft_with_teammates.on_court == on_court)[0][0]
+                    )
+    
+    fta = float(
+            s.query(func.count(Ft_with_teammates.id))\
+                        .filter(Ft_with_teammates.teammate_id == player_id,
+                                Ft_with_teammates.on_court == on_court)[0][0]
+            )   
+    
+    s.close()
+    
+    fg = total_shots/total_attempts
+    fg3 = total_3/(total_3pm+total_3)
+    eFG = (total_shots + 0.5*total_3)/total_attempts
+    ts = pts/(2*(total_attempts + 0.44*fta))
+    
+    assist_top, assist_left, unassist_top, unassist_left = \
+    get_player_data_assisted_onoff(player_id, onoff)
+    
+    unassist = float(len(unassist_top))/(len(unassist_left)+len(assist_left))
+    
+    return [fg, fg3, eFG, ts, unassist]
+    
+def shot_chart_values(all_top, all_left, makes_p_top, misses_p_top, makes_p_left, 
+                      misses_p_left, num_bins, bin_min, comp_type): 
+                        #PLOT CHART WITH PLAYER DATA AND BINS
+                        #COMP TYPE: 'eFG' = effective field goal 'avg' = league avg
+    
+    if comp_type == 'avg':            
+        hist_avg = bin_avg(num_bins)
+    elif comp_type == 'eFG':
+        hist_avg = bin_eFG(num_bins)
+    else:
+        print('error: comp_type wrong')
+        return                
+    
+    hist, xedges, yedges = np.histogram2d(all_left, all_top, bins=num_bins, range=[[0, 500], [0, 500]])
+    
+    # Construct arrays for the anchor positions of the bars.
+    # Note: np.meshgrid gives arrays in (ny, nx) so we use 'F' to flatten xpos,
+    # ypos in column-major order. For numpy >= 1.7, we could instead call meshgrid
+    # with indexing='ij'.
+    xpos, ypos = np.meshgrid(xedges[:-1] + 500.0/num_bins/2, yedges[:-1] + 500.0/num_bins/2)
+    xpos= xpos.flatten('F')
+    ypos= ypos.flatten('F')
+    zpos = np.zeros_like(xpos)
+    
+    # Construct arrays with the dimensions for the bars.
+    dx = 500/num_bins/4 * np.ones_like(zpos)
+    dy = dx.copy()
+    dz = hist.flatten()
+    
+    totals = sum(dz)
+    
+    dz_final = []
+    xpos_final, ypos_final, zpos_final = [],[],[]
+    
+    #Choose minimum number of shots per bin
+
+    use_index = []
+    
+    for index in range(len(dz)): 
+        if dz[index] > bin_min:
+            if dz[index] > 0.005 * totals:
+                dz_final.append(dz[index])
+                xpos_final.append(xpos[index])
+                ypos_final.append(ypos[index])
+                zpos_final.append(zpos[index])
+                use_index.append(index)
+    
+    #Determine fg percentage of bins
+    
+    hist_p_makes, xedges_makes, yedges_makes = np.histogram2d(makes_p_left, makes_p_top, bins = num_bins, range = [[0,500],[0,500]])
+    hist_p_misses, xedges_misses, yedges_misses = np.histogram2d(misses_p_left, misses_p_top, bins = num_bins, range = [[0,500],[0,500]])
+    
+    hist_p_avg = np.zeros_like(hist_p_makes)
+    
+    for x_coor in np.arange(hist_p_makes.shape[0]):
+        for y_coor in np.arange(hist_p_makes.shape[1]):
+            if hist_p_makes[x_coor][y_coor] + hist_p_misses[x_coor][y_coor] != 0:
+                hist_p_avg[x_coor][y_coor] = hist_p_makes[x_coor][y_coor]/(hist_p_makes[x_coor][y_coor] + hist_p_misses[x_coor][y_coor])
+    
+    #Color bars to reflect accuracy compared to the league
+
+    color_all = []
+    hist_p_avg = hist_p_avg.flatten()
+    
+    for index in use_index:
+        if hist_p_avg[index] < hist_avg[index] - 0.1:
+            color_all.append('#0000ff')
+        if hist_p_avg[index] >= hist_avg[index] - 0.1 and hist_p_avg[index] < hist_avg[index] - 0.06:
+            color_all.append('#6666ff')
+        if hist_p_avg[index] >= hist_avg[index] - 0.06 and hist_p_avg[index] < hist_avg[index] - 0.02:
+            color_all.append('#ccccff')
+        if hist_p_avg[index] >= hist_avg[index] - 0.02 and hist_p_avg[index] < hist_avg[index] + 0.02:
+            color_all.append('w')
+        if hist_p_avg[index] >= hist_avg[index] + 0.02 and hist_p_avg[index] < hist_avg[index] + 0.06:
+            color_all.append('#ffcccc')
+        if hist_p_avg[index] >= hist_avg[index] + 0.06 and hist_p_avg[index] < hist_avg[index] + 0.1:
+            color_all.append('#ff6666')
+        if hist_p_avg[index] >= hist_avg[index] + 0.1:
+            color_all.append('#ff0000')
+            
+    return [xpos_final, ypos_final, zpos_final, dz_final, color_all, use_index]
+
+def shot_chart_values_assisted(all_top, all_left, makes_p_top, misses_p_top, 
+                               makes_p_left, misses_p_left, player_id, num_bins, 
+                               bin_min, comp_type): #With assists
+    
+    xpos_final, ypos_final, zpos_final, dz_final, color_all, use_index = shot_chart_values(
+            all_top, all_left, makes_p_top, misses_p_top, makes_p_left, 
+            misses_p_left, num_bins, bin_min, comp_type)
+    
+    assist_top, assist_left, unassist_top, unassist_left = get_player_data_assisted(player_id)
+    
+    hist_assist, xedges, yedges = np.histogram2d(assist_left, assist_top, bins=num_bins, range=[[0, 500], [0, 500]])
+    hist_unassist, xedges, yedges = np.histogram2d(unassist_left, unassist_top, bins=num_bins, range=[[0, 500], [0, 500]])
+    
+    hist_assist = hist_assist.flatten()
+    hist_unassist = hist_unassist.flatten()
+    
+    hist_assist_final = []
+    
+    for index in use_index:
+        if hist_unassist[index] == 0 and hist_assist[index] == 0:
+            hist_assist_final.append(500.0/num_bins/6)
+            print 'hello'
+        else:    
+            unassist_percentage = float(hist_unassist[index])/(hist_unassist[index] + hist_assist[index])
+            if unassist_percentage >= 0 and unassist_percentage < 0.2:
+                hist_assist_final.append(500.0/num_bins/6*0.3)
+            elif unassist_percentage >= 0.2 and unassist_percentage < 0.4:
+                hist_assist_final.append(500.0/num_bins/6*0.65)
+            elif unassist_percentage >= 0.4 and unassist_percentage < 0.6:
+                hist_assist_final.append(500.0/num_bins/6)
+            elif unassist_percentage >= 0.6 and unassist_percentage < 0.8:
+                hist_assist_final.append(500.0/num_bins/6*1.35)
+            elif unassist_percentage >= 0.8 and unassist_percentage <= 1:
+                hist_assist_final.append(500.0/num_bins/6*1.7)
+            else:
+                print unassist_percentage, index
+                print 'error'
+    
+    return [xpos_final, ypos_final, zpos_final, dz_final, color_all, use_index, hist_assist_final]
+
+def shot_chart_values_assisted_onoff(all_top, all_left, makes_p_top, misses_p_top, 
+                               makes_p_left, misses_p_left, player_id, num_bins, 
+                               bin_min, comp_type, onoff): #With assists
+    
+    xpos_final, ypos_final, zpos_final, dz_final, color_all, use_index = shot_chart_values(
+            all_top, all_left, makes_p_top, misses_p_top, makes_p_left, 
+            misses_p_left, num_bins, bin_min, comp_type)
+    
+    assist_top, assist_left, unassist_top, unassist_left = \
+    get_player_data_assisted_onoff(player_id, onoff)
+    
+    hist_assist, xedges, yedges = np.histogram2d(assist_left, assist_top, bins=num_bins, range=[[0, 500], [0, 500]])
+    hist_unassist, xedges, yedges = np.histogram2d(unassist_left, unassist_top, bins=num_bins, range=[[0, 500], [0, 500]])
+    
+    hist_assist = hist_assist.flatten()
+    hist_unassist = hist_unassist.flatten()
+    
+    hist_assist_final = []
+    
+    for index in use_index:
+        if hist_unassist[index] == 0 and hist_assist[index] == 0:
+            hist_assist_final.append(500.0/num_bins/6)
+            print 'hello'
+        else:    
+            unassist_percentage = float(hist_unassist[index])/(hist_unassist[index] + hist_assist[index])
+            if unassist_percentage >= 0 and unassist_percentage < 0.2:
+                hist_assist_final.append(500.0/num_bins/6*0.3)
+            elif unassist_percentage >= 0.2 and unassist_percentage < 0.4:
+                hist_assist_final.append(500.0/num_bins/6*0.65)
+            elif unassist_percentage >= 0.4 and unassist_percentage < 0.6:
+                hist_assist_final.append(500.0/num_bins/6)
+            elif unassist_percentage >= 0.6 and unassist_percentage < 0.8:
+                hist_assist_final.append(500.0/num_bins/6*1.35)
+            elif unassist_percentage >= 0.8 and unassist_percentage <= 1:
+                hist_assist_final.append(500.0/num_bins/6*1.7)
+            else:
+                print unassist_percentage, index
+                print 'error'
+    
+    return [xpos_final, ypos_final, zpos_final, dz_final, color_all, use_index, hist_assist_final]
+
+def add_color_key(xpos_final, ypos_final, zpos_final, dx_final, dy_final, dz_final, color_all): #Add Color key
+    
+    for value in range(7):
+        xpos_final.append(320 + value*500.0/num_bins/2)
+    ypos_final += [360] * 7
+    zpos_final += [0] * 7
+    dx_final = np.append(dx_final,[500.0/num_bins/2]*7)
+    dy_final = np.append(dy_final,[500.0/num_bins/4]*7)
+    dz_final_max = float(max(dz_final))/60
+    dz_final += [dz_final_max]*7
+    color_all += ['#0000ff', '#6666ff', '#ccccff', 'w', '#ffcccc', '#ff6666', '#ff0000']
+                 
+    return [xpos_final, ypos_final, zpos_final, dx_final, dy_final, dz_final, color_all]
+    
+
+def plot_shot_chart(xpos_final, ypos_final, zpos_final, dx_final, dy_final, 
+                    dz_final, color_all, player_id, comp_type):
+    
+    #plot size
+    fig = plt.figure(figsize = (9,6))
+    
+    session = sessionmaker()
+    session.configure(bind=engine)
+    
+    #Get player name
+    s = session()
+    
+    player_name = s.query(Players).filter(Players.player_id == player_id)[0]
+    
+    s.close()
+    
+    #Shot Chart
+    ax = fig.add_subplot(111, projection = '3d')
+    plt.xticks([]) #remove all x and y ticks
+    plt.yticks([])
+    ax.set_xlim(0,500)
+    ax.set_ylim(0,472)
+    ax.set_zlabel(' # Shots Taken')
+    
+    ax.invert_xaxis()
+    
+    #Stylistic elements
+    csfont = {'fontname':'Microsoft Sans Serif', 'size': 20} #font size and value
+    statsfont = {'fontname':'Microsoft Sans Serif', 'size': 10} #font size and value
+             
+    #Text
+    ax.text2D(0.10,.95,player_name.name, transform=ax.transAxes, 
+              bbox=dict(facecolor='w', edgecolor='black', pad = 10.0), **csfont)
+    
+    fg, fg3, eFG, ts, unassist, total_attempts = get_key_stats(player_id)
+    
+    key_stats_label = 'FG%%: %.3f \n3FG%%: %.3f \neFG%%: %.3f \nTS%%: %.3f \n%% unassisted: %.3f \nTotal FGA: %.0f' \
+    %(fg, fg3, eFG, ts, unassist, total_attempts)
+    
+    ax.text2D(0.68, 0.78, key_stats_label, transform = ax.transAxes,
+              bbox=dict(facecolor='w', edgecolor='black', pad = 10.0), **statsfont)
+    
+    if comp_type == 'eFG': #color key
+        color_label = 'FG% vs. Lg. eFG%'
+    elif comp_type == 'avg':
+        color_label == 'FG% vs. Lg. avg.'
+    ax.text(320,455,0,color_label,(1,-0.14,0), fontsize = 9)
+    ax.text(310,395,0,'below                 above',(1,-0.14,0), fontsize = 7)
+    ax.text(310,415,0,'average              average',(1,-0.14,0), fontsize = 7)
+    
+    if 'g' in color_all: #assist percentage key
+        ax.text(30,450,0,'% unassisted',(1,-0.13,0))
+        ax.text(25,410,0,'<20      40-60     >80',(1,-0.13,0), fontsize = 7)
+    
+    #Get half court image
+    img = mpimg.imread('nbahalfcourt.png')
+    X1 = np.arange(0,500,1)
+    Y1 = np.arange(0,472,1)
+    X1, Y1 = np.meshgrid(X1,Y1)
+    
+    ax.bar3d(xpos_final, ypos_final, zpos_final, dx_final, dy_final, dz_final, color = color_all, zsort = 'average')
+    ax.plot_surface(X1, Y1, 0, rstride = 3, cstride = 3, facecolors = img, shade = False)
+    
+    ax.view_init(elev = 50, azim = 120)
+    
+    plt.show()   
+    
+def plot_shot_chart_onoff(xpos_final, ypos_final, zpos_final, dx_final, dy_final, 
+                    dz_final, color_all, player_id, comp_type, onoff):
+    
+    #plot size
+    fig = plt.figure(figsize = (9,6))
+    
+    session = sessionmaker()
+    session.configure(bind=engine)
+    
+    #Get player name
+    s = session()
+    
+    player_name = s.query(Players).filter(Players.player_id == player_id)[0]
+    
+    s.close()
+    
+    #Shot Chart
+    ax = fig.add_subplot(111, projection = '3d')
+    plt.xticks([]) #remove all x and y ticks
+    plt.yticks([])
+    ax.set_xlim(0,500)
+    ax.set_ylim(0,472)
+    ax.set_zlabel(' # Shots Taken')
+    
+    ax.invert_xaxis()
+    
+    #Stylistic elements
+    csfont = {'fontname':'Microsoft Sans Serif', 'size': 20} #font size and value
+    statsfont = {'fontname':'Microsoft Sans Serif', 'size': 10} #font size and value
+             
+    #Text
+    ax.text2D(0.10,.95,player_name.name + ' ' + onoff, transform=ax.transAxes, 
+              bbox=dict(facecolor='w', edgecolor='black', pad = 10.0), **csfont)
+    
+    fg, fg3, eFG, ts, unassist = get_key_stats_onoff(player_id, onoff)
+    
+    key_stats_label = 'FG%%: %.3f \n3FG%%: %.3f \neFG%%: %.3f \nTS%%: %.3f \n%% unassisted: %.3f' \
+    %(fg, fg3, eFG, ts, unassist)
+    
+    ax.text2D(0.68, 0.78, key_stats_label, transform = ax.transAxes,
+              bbox=dict(facecolor='w', edgecolor='black', pad = 10.0), **statsfont)
+    
+    if comp_type == 'eFG': #color key
+        color_label = 'FG% vs. Lg. eFG%'
+    elif comp_type == 'avg':
+        color_label == 'FG% vs. Lg. avg.'
+    ax.text(320,455,0,color_label,(1,-0.14,0), fontsize = 9)
+    ax.text(310,395,0,'below                 above',(1,-0.14,0), fontsize = 7)
+    ax.text(310,415,0,'average              average',(1,-0.14,0), fontsize = 7)
+    
+    if 'g' in color_all: #assist percentage key
+        ax.text(30,450,0,'% unassisted',(1,-0.13,0))
+        ax.text(25,410,0,'<20      40-60     >80',(1,-0.13,0), fontsize = 7)
+    
+    #Get half court image
+    img = mpimg.imread('nbahalfcourt.png')
+    X1 = np.arange(0,500,1)
+    Y1 = np.arange(0,472,1)
+    X1, Y1 = np.meshgrid(X1,Y1)
+    
+    ax.bar3d(xpos_final, ypos_final, zpos_final, dx_final, 
+             dy_final, dz_final, color = color_all, zsort = 'average')
+    ax.plot_surface(X1, Y1, 0, rstride = 3, cstride = 3, facecolors = img, shade = False)
+    
+    ax.view_init(elev = 50, azim = 120)
+    
+    plt.show()   
+    
+def plot_shot_chart_onoff_comp(plots):
+    
+    player_id = plots[0][7]
+    comp_type = plots[0][8]
+    color_all = plots[0][6]
+    
+    #plot size
+    fig = plt.figure(figsize = (18,5))
+    
+    session = sessionmaker()
+    session.configure(bind=engine)
+    
+    #Get player name
+    s = session()
+    
+    player_name = s.query(Players).filter(Players.player_id == player_id)[0]
+    
+    s.close()
+    
+    #Shot Chart
+    ax = fig.add_subplot(121, projection = '3d')
+    plt.xticks([]) #remove all x and y ticks
+    plt.yticks([])
+    ax.set_xlim(0,500)
+    ax.set_ylim(0,472)
+    ax.set_zlabel(' # Shots Taken')
+    ax.view_init(elev = 45, azim = 120)
+    
+    ax.invert_xaxis()
+    
+    ax2 = fig.add_subplot(122, projection = '3d')
+    plt.xticks([]) #remove all x and y ticks
+    plt.yticks([])
+    ax2.set_xlim(0,500)
+    ax2.set_ylim(0,472)
+    ax2.set_zlabel(' # Shots Taken')
+    ax2.view_init(elev = 45, azim = 120)
+    
+    ax2.invert_xaxis()
+
+    plt.tight_layout()
+    
+    #Stylistic elements
+    csfont = {'fontname':'Microsoft Sans Serif', 'size': 18} #font size and value
+    statsfont = {'fontname':'Microsoft Sans Serif', 'size': 10} #font size and value
+             
+    #Text
+    ax2.text2D(0.5,0.92,player_name.name, transform=fig.transFigure,
+               horizontalalignment = 'center',
+              bbox=dict(facecolor='w', edgecolor='black', pad = 10.0), **csfont)
+    ax.text2D(0.85,.85,'ON', transform=ax.transAxes, 
+              verticalalignment = 'top', horizontalalignment = 'right',
+              bbox=dict(facecolor='w', edgecolor='black', pad = 10.0), **csfont)
+    ax2.text2D(0.85,.85,'OFF', transform=ax2.transAxes, 
+               verticalalignment = 'top', horizontalalignment = 'right',
+               bbox=dict(facecolor='w', edgecolor='black', pad = 10.0), **csfont)
+    
+    fg_on, fg3_on, eFG_on, ts_on, unassist_on = get_key_stats_onoff(player_id, 'on')
+    fg_off, fg3_off, eFG_off, ts_off, unassist_off = get_key_stats_onoff(player_id, 'off')
+    
+    key_stats_label_on = 'FG%%: %.3f \n3FG%%: %.3f \neFG%%: %.3f \nTS%%: %.3f \n%% unassisted: %.3f' \
+    %(fg_on, fg3_on, eFG_on, ts_on, unassist_on)
+    
+    key_stats_label_off = 'FG%%: %.3f \n3FG%%: %.3f \neFG%%: %.3f \nTS%%: %.3f \n%% unassisted: %.3f' \
+    %(fg_off, fg3_off, eFG_off, ts_off, unassist_off)
+    
+    ax.text2D(0.15, 0.85, key_stats_label_on, transform = ax.transAxes,
+              verticalalignment = 'top', horizontalalignment = 'left',
+              bbox=dict(facecolor='w', edgecolor='black', pad = 10.0), **statsfont) 
+    
+    ax2.text2D(0.15, 0.85, key_stats_label_off, transform = ax2.transAxes,
+               verticalalignment = 'top', horizontalalignment = 'left',
+              bbox=dict(facecolor='w', edgecolor='black', pad = 10.0), **statsfont) 
+    
+    if comp_type == 'eFG': #color key
+        color_label = 'FG% vs. Lg. eFG%'
+    elif comp_type == 'avg':
+        color_label == 'FG% vs. Lg. avg.'
+    
+    #Get half court image
+    img = mpimg.imread('nbahalfcourt.png')
+    X1 = np.arange(0,500,1)
+    Y1 = np.arange(0,472,1)
+    X1, Y1 = np.meshgrid(X1,Y1)
+        
+    axis_list = [ax, ax2]
+    
+    for index in [0,1]:
+        axis_list[index].text(315,455,0,color_label,(1,-0.11,0), fontsize = 9)
+        axis_list[index].text(306,395,0,'below                 above',(1,-0.11,0), fontsize = 7)
+        axis_list[index].text(302,415,0,'average              average',(1,-0.11,0), fontsize = 7)
+
+        if 'g' in color_all: #assist percentage key
+            axis_list[index].text(30,450,0,'% unassisted',(1,-0.1,0))
+            axis_list[index].text(25,410,0,'<20      40-60     >80',(1,-0.1,0), fontsize = 7)
+        
+        xpos_final, ypos_final, zpos_final, dx_final, dy_final,\
+        dz_final, color_all, player_id, comp_type, onoff = plots[index]
+        
+        axis_list[index].bar3d(xpos_final, ypos_final, zpos_final, dx_final,
+                 dy_final, dz_final, color = color_all, zsort = 'average')
+        
+        axis_list[index].plot_surface(X1, Y1, 0, rstride = 3, cstride = 3,
+                 facecolors = img, shade = False)
+    
+    fig.savefig(player_name.name + '.png', dpi = 500)
+    
+def shot_chart_figure_basic(player_id, num_bins, bin_min, comp_type):
+    
+    all_top, all_left, makes_p_top, misses_p_top, makes_p_left, misses_p_left\
+    = get_player_data(player_id)
+    
+    xpos_final, ypos_final, zpos_final, dz_final, color_all, use_index = shot_chart_values(
+            all_top, all_left, makes_p_top, misses_p_top, makes_p_left, 
+            misses_p_left, num_bins, bin_min, comp_type)
+
+    dx_final = 500.0/num_bins/6 * np.ones_like(dz_final)
+    dy_final = dx_final.copy()
+    
+    xpos_final, ypos_final, zpos_final, dx_final, dy_final, dz_final, color_all\
+    =add_color_key(
+            xpos_final, ypos_final, zpos_final, dx_final, 
+            dy_final, dz_final, color_all)
+       
+    plot_shot_chart(xpos_final, ypos_final, zpos_final, dx_final, dy_final, 
+                    dz_final, color_all, player_id, comp_type)
+    
+def shot_chart_figure_assisted(player_id, num_bins, bin_min, comp_type):
+    
+    all_top, all_left, makes_p_top, misses_p_top, makes_p_left, misses_p_left\
+    = get_player_data(player_id)
+    
+    xpos_final, ypos_final, zpos_final, dz_final, color_all, use_index, hist_assist_final \
+    = shot_chart_values_assisted(all_top, all_left, makes_p_top, misses_p_top, 
+                                 makes_p_left, misses_p_left, player_id, num_bins, bin_min, 
+                                 comp_type)
+    
+    dx_final = np.asarray(hist_assist_final)
+    dy_final = dx_final.copy()
+    
+    xpos_final, ypos_final, zpos_final, dx_final, dy_final, dz_final, color_all\
+    =add_color_key(
+            xpos_final, ypos_final, zpos_final, dx_final, 
+            dy_final, dz_final, color_all)
+    
+    #Add Size Key
+    for value in [0, 1, 2, 3, 4]:
+        xpos_final.append(40 + value*500.0/num_bins/1.5)
+    ypos_final += [375] * 5
+    zpos_final += [0,0,0,0,0]
+    for value in [0.3, 0.65, 1, 1.35, 1.7]:
+        dx_final = np.append(dx_final,[500.0/num_bins/6*value])
+        dy_final = np.append(dy_final,[500.0/num_bins/6*value])
+    dz_final_max = max(dz_final)/5
+    dz_final += [dz_final_max]*5
+    color_all += ['g']*5
+                 
+    plot_shot_chart(xpos_final, ypos_final, zpos_final, dx_final, dy_final, 
+                    dz_final, color_all, player_id, comp_type)
+     
+def shot_chart_figure_onoff(player_id, num_bins, bin_min, comp_type, onoff): 
+    #onoff: 'on' = on, 'off' = off
+    
+    all_top, all_left, makes_p_top, misses_p_top, makes_p_left, misses_p_left\
+    = get_player_data_onoff(player_id, onoff)
+    
+    xpos_final, ypos_final, zpos_final, dz_final, color_all, use_index, hist_assist_final \
+    = shot_chart_values_assisted(all_top, all_left, makes_p_top, misses_p_top, 
+                                 makes_p_left, misses_p_left, player_id, num_bins, bin_min, 
+                                 comp_type)
+    
+    dx_final = 500.0/num_bins/6 * np.ones_like(dz_final)   
+    dy_final = dx_final.copy()
+    
+    xpos_final, ypos_final, zpos_final, dx_final, dy_final, dz_final, color_all\
+    =add_color_key(
+            xpos_final, ypos_final, zpos_final, dx_final, 
+            dy_final, dz_final, color_all)
+       
+    plot_shot_chart_onoff(xpos_final, ypos_final, zpos_final, dx_final, dy_final, 
+                    dz_final, color_all, player_id, comp_type, onoff)
+    
+def shot_chart_figure_onoff_assisted(player_id, num_bins, bin_min, comp_type, onoff): 
+    #onoff: 'on' = on, 'off' = off
+    
+    all_top, all_left, makes_p_top, misses_p_top, makes_p_left, misses_p_left\
+    = get_player_data_onoff(player_id, onoff)
+    
+    xpos_final, ypos_final, zpos_final, dz_final, color_all, use_index, hist_assist_final \
+    = shot_chart_values_assisted_onoff(all_top, all_left, makes_p_top, misses_p_top, 
+                                 makes_p_left, misses_p_left, player_id, num_bins, bin_min, 
+                                 comp_type, onoff)
+    
+    dx_final = np.asarray(hist_assist_final)
+    dy_final = dx_final.copy()
+    
+    xpos_final, ypos_final, zpos_final, dx_final, dy_final, dz_final, color_all\
+    =add_color_key(
+            xpos_final, ypos_final, zpos_final, dx_final, 
+            dy_final, dz_final, color_all)
+    
+    #Add Size Key
+    for value in [0, 1, 2, 3, 4]:
+        xpos_final.append(40 + value*500.0/num_bins/1.5)
+    ypos_final += [375] * 5
+    zpos_final += [0,0,0,0,0]
+    for value in [0.3, 0.65, 1, 1.35, 1.7]:
+        dx_final = np.append(dx_final,[500.0/num_bins/6*value])
+        dy_final = np.append(dy_final,[500.0/num_bins/6*value])
+    dz_final_max = max(dz_final)/5
+    dz_final += [dz_final_max]*5
+    color_all += ['g']*5
+       
+    plot_shot_chart_onoff(xpos_final, ypos_final, zpos_final, dx_final, dy_final, 
+                    dz_final, color_all, player_id, comp_type, onoff)
+
+def shot_chart_onoff_assisted_comp(player_id, num_bins, bin_min, comp_type):
+    
+    onoff_vals = ['on', 'off']
+    
+    plots = []
+    
+    for onoff in onoff_vals:
+        all_top, all_left, makes_p_top, misses_p_top, makes_p_left, misses_p_left\
+        = get_player_data_onoff(player_id, onoff)
+        
+        xpos_final, ypos_final, zpos_final, dz_final, color_all, use_index, hist_assist_final \
+        = shot_chart_values_assisted_onoff(all_top, all_left, makes_p_top, 
+                                misses_p_top, makes_p_left, misses_p_left, 
+                                player_id, num_bins, bin_min, comp_type, onoff)
+        
+        dx_final = np.asarray(hist_assist_final)
+        dy_final = dx_final.copy()
+        
+        xpos_final, ypos_final, zpos_final, dx_final, dy_final, dz_final, color_all\
+        =add_color_key(
+                xpos_final, ypos_final, zpos_final, dx_final, 
+                dy_final, dz_final, color_all)
+        
+        #Add Size Key
+        for value in [0, 1, 2, 3, 4]:
+            xpos_final.append(40 + value*500.0/num_bins/1.5)
+        ypos_final += [375] * 5
+        zpos_final += [0,0,0,0,0]
+        for value in [0.3, 0.65, 1, 1.35, 1.7]:
+            dx_final = np.append(dx_final,[500.0/num_bins/6*value])
+            dy_final = np.append(dy_final,[500.0/num_bins/6*value])
+        dz_final_max = max(dz_final)/10
+        dz_final += [dz_final_max]*5
+        color_all += ['g']*5
+                     
+        plots.append([xpos_final, ypos_final, zpos_final, dx_final, dy_final, 
+                    dz_final, color_all, player_id, comp_type, onoff])
+    
+    plot_shot_chart_onoff_comp(plots)
+        
